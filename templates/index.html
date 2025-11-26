@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <title>Raspberry Pi Webcam Stream</title>
     <style>
@@ -14,13 +15,23 @@
         }
     </style>
 </head>
+
 <body>
     <div style="text-align: center;">
         <h1>Live Stream</h1>
         <img src="{{ url_for('video_feed') }}" width="640" height="480">
     </div>
-    <form action="/battle" method="post">
-        <button type="submit">Battle</button>
-    </form>
+    <div style="text-align: center; margin-top: 10px;">
+        <form action="/capture" method="post" style="display: inline;">
+            <input type="text" name="name" placeholder="Enter name" required>
+            <button type="submit">Capture</button>
+        </form>
+    </div>
+    <div style="text-align: center; margin-top: 10px;">
+        <form action="/battle" method="post" style="display: inline;">
+            <button type="submit">Battle</button>
+        </form>
+    </div>
 </body>
+
 </html>

@@ -1,5 +1,5 @@
+from flask import Flask, Response, render_template, redirect, url_for, request
 import cv2
-from flask import Flask, Response, render_template, redirect, url_for
 from deepface import DeepFace
 import threading
 import os
@@ -52,10 +52,11 @@ def check_face(frame):
                     w = int(df.iloc[0]['source_w'])
                     h = int(df.iloc[0]['source_h'])
                     
-                    # Get name
+                    # Get name from filename (e.g., "john_1.jpg" -> "JOHN")
                     full_path = df.iloc[0]['identity']
                     filename = os.path.basename(full_path)
-                    name = os.path.splitext(filename)[0].upper()
+                    name_part = os.path.splitext(filename)[0]
+                    name = ''.join(filter(str.isalpha, name_part)).upper()
                     
                     new_locations.append((x, y, w, h))
                     new_names.append(name)
@@ -114,16 +115,21 @@ def video_feed():
 @app.route('/capture', methods=['POST'])
 def capture():
     global latest_frame
-    if latest_frame is not None:
+    name = request.form.get('name')
+
+    if latest_frame is not None and name:
         # Convert to RGB before saving
         rgb_frame = cv2.cvtColor(latest_frame, cv2.COLOR_RGBA2RGB)
         rgb_frame = cv2.flip(rgb_frame, 1)
         
-        # Create a unique filename
-        person_name = "person" # You can change this to a name from a form input
-        existing_files = len([name for name in os.listdir(db_path) if name.endswith(('.jpg', '.png'))])
-        filename = f"{person_name}_{existing_files + 1}.jpg"
-        filepath = os.path.join(db_path, filename)
+        # Find the next available number for the filename
+        i = 1
+        while True:
+            filename = f"{name}_{i}.jpg"
+            filepath = os.path.join(db_path, filename)
+            if not os.path.exists(filepath):
+                break
+            i += 1
         
         cv2.imwrite(filepath, rgb_frame)
         print(f"Image saved to {filepath}")
