@@ -1,7 +1,11 @@
 import smbus
 import gpiod
 import serial
+import requests
 from time import sleep
+from concurrent.futures import ThreadPoolExecutor
+
+WEB_URL = 'http://10.166.99.87:3001'
 
 LED_PIN = 26
 MAGNET_PIN = 16
@@ -29,7 +33,6 @@ GYRO_XOUT_H  = 0x43
 GYRO_YOUT_H  = 0x45
 GYRO_ZOUT_H  = 0x47
 
-
 def MPU_Init():
 	bus.write_byte_data(Device_Address, SMPLRT_DIV, 7)
 	bus.write_byte_data(Device_Address, PWR_MGMT_1, 1)
@@ -50,46 +53,98 @@ Device_Address = 0x68
 
 MPU_Init()
 
-try:
-    while True:
-        acc_x = read_raw_data(ACCEL_XOUT_H)
-        acc_y = read_raw_data(ACCEL_YOUT_H)
-        acc_z = read_raw_data(ACCEL_ZOUT_H)
+safe_status = 'open' # open lock unlock
 
-        gyro_x = read_raw_data(GYRO_XOUT_H)
-        gyro_y = read_raw_data(GYRO_YOUT_H)
-        gyro_z = read_raw_data(GYRO_ZOUT_H)
+def post_data(data):
+    try:
+        print(f'posting {data}')
+        vibrate = data['vibrate']
+        safeId = data['safeId']
+        print(requests.post(WEB_URL + '/api/rotation-data', json={
+            'alpha': data['Gx'],
+            'beta': data['Gy'],
+            'gamma': data['Gz'],
+            'safeId': safeId,
+        }, timeout=2).json())
+        if len(vibrate) > 0:
+            print(requests.post(WEB_URL + '/api/sensor-data', json={
+                'sensorType': 'vibrate',
+                'value': sum(vibrate)/len(vibrate),
+                'safeId': safeId,
+            }, timeout=2).json())
+        print(requests.post(WEB_URL + '/api/safe-status', json={
+            'status': data['status'],
+            'safeId': safeId,
+        }, timeout=2).json())
+    except Exception as e:
+        print('error(post):', e)
 
-        Ax = acc_x/16384.0
-        Ay = acc_y/16384.0
-        Az = acc_z/16384.0
+with ThreadPoolExecutor() as executor:
+    try:
+        while True:
+            acc_x = read_raw_data(ACCEL_XOUT_H)
+            acc_y = read_raw_data(ACCEL_YOUT_H)
+            acc_z = read_raw_data(ACCEL_ZOUT_H)
 
-        Gx = gyro_x/131.0
-        Gy = gyro_y/131.0
-        Gz = gyro_z/131.0
+            gyro_x = read_raw_data(GYRO_XOUT_H)
+            gyro_y = read_raw_data(GYRO_YOUT_H)
+            gyro_z = read_raw_data(GYRO_ZOUT_H)
 
-        print ("Gx=%.2f" %Gx, u'\u00b0'+ "/s", "\tGy=%.2f" %Gy, u'\u00b0'+ "/s", "\tGz=%.2f" %Gz, u'\u00b0'+ "/s", "\tAx=%.2f g" %Ax, "\tAy=%.2f g" %Ay, "\tAz=%.2f g" %Az) 	
+            Ax = acc_x/16384.0
+            Ay = acc_y/16384.0
+            Az = acc_z/16384.0
 
-        magnet_value = magnet_line.get_value()
-        print(f'magnet = {magnet_value}')
+            Gx = gyro_x/131.0
+            Gy = gyro_y/131.0
+            Gz = gyro_z/131.0
 
-        if magnet_value == 0:
-            buzzer_line.set_value(1)
-        else:
-            buzzer_line.set_value(0)
+            print ("Gx=%.2f" %Gx, u'\u00b0'+ "/s", "\tGy=%.2f" %Gy, u'\u00b0'+ "/s", "\tGz=%.2f" %Gz, u'\u00b0'+ "/s", "\tAx=%.2f g" %Ax, "\tAy=%.2f g" %Ay, "\tAz=%.2f g" %Az) 	
 
-        if Gx > 10.0:
-            led_line.set_value(1)
-        else:
-            led_line.set_value(0)
+            magnet_value = magnet_line.get_value()
+            print(f'magnet = {magnet_value}')
 
-        try:
-            while ser.in_waiting > 0:
-                line = ser.readline().decode('utf-8').strip()
-                print(f'serial: {line}')
-        except serial.SerialException as e:
-            print(e)
+            if magnet_value == 0:
+                buzzer_line.set_value(1)
+            else:
+                buzzer_line.set_value(0)
 
-        sleep(1)
-finally:
-    led_line.release()
+            if Gx > 10.0:
+                led_line.set_value(1)
+            else:
+                led_line.set_value(0)
+
+            joystick = []
+            vibrate = []
+            try:
+                while ser.in_waiting > 0:
+                    line = ser.readline().decode('utf-8').strip()
+                    args = line.split()
+                    try:
+                        if args[0] == 'VIBRATED':
+                            vibrate.append(int(args[1]))
+                        else:
+                            joystick.append(args[0])
+                    except:
+                        print('error(serial parser):', line)
+                    print(f'serial: {line}')
+            except serial.SerialException as e:
+                print('error(serial)', e)
+
+            executor.submit(post_data, {
+                'Gx': Gx,
+                'Gy': Gy,
+                'Gz': Gz,
+                'vibrate': vibrate,
+                'status': safe_status,
+                'safeId': '0',
+            })
+
+            sleep(1)
+    except Exception as e:
+        print('error:', e)
+    finally:
+        buzzer_line.set_value(0)
+        led_line.set_value(0)
+        buzzer_line.release()
+        led_line.release()
+        magnet_line.release()
