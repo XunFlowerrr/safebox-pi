@@ -1,9 +1,11 @@
 import cv2
-from flask import Flask, Response, render_template
-import mediapipe as mp
-import random
+from flask import Flask, Response, render_template, redirect, url_for
+from deepface import DeepFace
+import threading
+import os
 from picamera2 import Picamera2
 import numpy as np
+import time
 
 app = Flask(__name__)
 
@@ -12,117 +14,94 @@ picam2 = Picamera2()
 picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)}))
 picam2.start()
 
-# Finger landmark mapping
-finger_landmarks = [
-    ("Index_finger", mp.solutions.hands.HandLandmark.INDEX_FINGER_PIP, mp.solutions.hands.HandLandmark.INDEX_FINGER_TIP),
-    ("Middle_finger", mp.solutions.hands.HandLandmark.MIDDLE_FINGER_PIP, mp.solutions.hands.HandLandmark.MIDDLE_FINGER_TIP),
-    ("Ring_finger", mp.solutions.hands.HandLandmark.RING_FINGER_PIP, mp.solutions.hands.HandLandmark.RING_FINGER_TIP),
-    ("Pinky_finger", mp.solutions.hands.HandLandmark.PINKY_PIP, mp.solutions.hands.HandLandmark.PINKY_TIP),
-]
+# --- FACE RECOGNITION CONFIGURATION ---
+db_path = "photos"
+if not os.path.exists(db_path):
+    os.makedirs(db_path)
 
-finger_y_coordinates = {}
-choice = ['PAPER', 'ROCK', 'SCISSORS']
-character = "PAPER"  # default
+# Global variables for face recognition
+face_locations = []
+face_names = []
+is_processing = False  # Flag to check if AI is currently busy
+latest_frame = None
 
+# --- AI Function for Face Recognition (Runs in the background) ---
+def check_face(frame):
+    global face_locations, face_names, is_processing
+    
+    try:
+        # Convert frame from RGBA to RGB
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
 
+        # Use a specific model for face recognition
+        dfs = DeepFace.find(img_path=rgb_frame, 
+                            db_path=db_path, 
+                            model_name="VGG-Face", 
+                            enforce_detection=False, 
+                            silent=True)
+        
+        new_locations = []
+        new_names = []
 
-# Hand classifier
-def classifier(Index_finger_tip_y, Index_finger_pip_y, Middle_finger_tip_y, Middle_finger_pip_y, Ring_finger_tip_y, Ring_finger_pip_y, Pinky_finger_tip_y, Pinky_finger_pip_y):
-    # TODO #1: Implement the `classifier` function to determine the gesture 
-    # between "ROCK", "SCISSORS", or "PAPER" 
-    index_open = Index_finger_tip_y < Index_finger_pip_y
-    middle_open = Middle_finger_tip_y < Middle_finger_pip_y
-    ring_open = Ring_finger_tip_y < Ring_finger_pip_y
-    pinky_open = Pinky_finger_tip_y < Pinky_finger_pip_y
+        if len(dfs) > 0:
+            for df in dfs:
+                if not df.empty:
+                    # Get coordinates
+                    x = int(df.iloc[0]['source_x'])
+                    y = int(df.iloc[0]['source_y'])
+                    w = int(df.iloc[0]['source_w'])
+                    h = int(df.iloc[0]['source_h'])
+                    
+                    # Get name
+                    full_path = df.iloc[0]['identity']
+                    filename = os.path.basename(full_path)
+                    name = os.path.splitext(filename)[0].upper()
+                    
+                    new_locations.append((x, y, w, h))
+                    new_names.append(name)
 
-    if index_open and middle_open and ring_open and pinky_open:
-        return "PAPER"
-    elif index_open and middle_open and not ring_open and not pinky_open:
-        return "SCISSOR"
-    elif not index_open and not middle_open and not ring_open and not pinky_open:
-        return "ROCK"
-    elif index_open and pinky_open and not middle_open and not ring_open:
-        return "LOVE"
-    else:
-        return ""
+        face_locations = new_locations
+        face_names = new_names
 
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
+    except Exception as e:
+        print(f"Error in AI thread: {e}")
+    
+    finally:
+        is_processing = False
 
-# Frame generator
+# Frame generator for video stream
 def generate_frames():
-    global character
-    with mp_hands.Hands(
-        model_complexity=0,
-        min_detection_confidence=0.3,
-        min_tracking_confidence=0.5,
-        max_num_hands=2) as hands:
+    global is_processing, face_locations, face_names, latest_frame
+    while True:
+        frame = picam2.capture_array()
+        latest_frame = frame.copy()
+        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+            print("Ignoring empty camera frame.")
+            continue
 
-        while True:
-            frame = picam2.capture_array()
-            if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
-                print("Ignoring empty camera frame.")
-                continue
+        frame = cv2.flip(frame, 1)
+        
+        # --- AI WORKER START ---
+        if not is_processing:
+            is_processing = True
+            threading.Thread(target=check_face, args=(frame.copy(),)).start()
 
-            frame = cv2.flip(frame, 1)
+        # --- DRAWING ---
+        if face_locations:
+            for (x, y, w, h), name in zip(face_locations, face_names):
+                # Draw Green Box
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                cv2.rectangle(frame, (x, y-35), (x+w, y), (0, 255, 0), cv2.FILLED)
+                cv2.putText(frame, name, (x+6, y-6), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
+        
+        if is_processing:
+            cv2.circle(frame, (20, 20), 5, (0, 0, 255), -1) # Red dot for "Thinking"
 
-            # Process with MediaPipe
-            frame.flags.writeable = False
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = hands.process(rgb_frame)
-
-            frame.flags.writeable = True
-            frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
-            frame_height, frame_width, _ = frame.shape
-
-            if results.multi_hand_landmarks:
-                for hand_landmarks in results.multi_hand_landmarks:
-                    x_, y_ = [], []
-                    for lm in hand_landmarks.landmark:
-                        x_.append(lm.x)
-                        y_.append(lm.y)
-
-                    # Save finger y coordinates
-                    for finger_name, pip_landmark, tip_landmark in finger_landmarks:
-                        finger_y_coordinates[f"{finger_name}_pip_y"] = hand_landmarks.landmark[pip_landmark].y * frame_height
-                        finger_y_coordinates[f"{finger_name}_tip_y"] = hand_landmarks.landmark[tip_landmark].y * frame_height
-
-                    # Unpack variables safely
-                    Index_finger_tip_y = finger_y_coordinates["Index_finger_tip_y"]
-                    Index_finger_pip_y = finger_y_coordinates["Index_finger_pip_y"]
-                    Middle_finger_tip_y = finger_y_coordinates["Middle_finger_tip_y"]
-                    Middle_finger_pip_y = finger_y_coordinates["Middle_finger_pip_y"]
-                    Ring_finger_tip_y = finger_y_coordinates["Ring_finger_tip_y"]
-                    Ring_finger_pip_y = finger_y_coordinates["Ring_finger_pip_y"]
-                    Pinky_finger_tip_y = finger_y_coordinates["Pinky_finger_tip_y"]
-                    Pinky_finger_pip_y = finger_y_coordinates["Pinky_finger_pip_y"]
-
-                    # Classify gesture
-                    character = classifier(Index_finger_tip_y, Index_finger_pip_y, Middle_finger_tip_y, Middle_finger_pip_y, Ring_finger_tip_y, Ring_finger_pip_y, Pinky_finger_tip_y, Pinky_finger_pip_y)
-
-                    # Draw hand landmarks
-                    mp_drawing.draw_landmarks(
-                        frame,
-                        hand_landmarks,
-                        mp_hands.HAND_CONNECTIONS,
-                        mp_drawing_styles.get_default_hand_landmarks_style(),
-                        mp_drawing_styles.get_default_hand_connections_style())
-
-                    # Draw bounding box & text
-                    x1 = int(min(x_) * frame_width) - 10
-                    y1 = int(min(y_) * frame_height) - 10
-                    x2 = int(max(x_) * frame_width) + 10
-                    y2 = int(max(y_) * frame_height) + 10
-
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), 4)
-                    cv2.putText(frame, character, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 0, 0), 3, cv2.LINE_AA)
-
-            # Encode to JPEG
-            ret, buffer = cv2.imencode('.jpg', frame)
-            if not ret:
-                continue
-            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+        # Encode to JPEG
+        ret, buffer = cv2.imencode('.jpg', frame)
+        if not ret:
+            continue
+        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
 
 @app.route('/')
 def index():
@@ -132,21 +111,32 @@ def index():
 def video_feed():
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
+@app.route('/capture', methods=['POST'])
+def capture():
+    global latest_frame
+    if latest_frame is not None:
+        # Convert to RGB before saving
+        rgb_frame = cv2.cvtColor(latest_frame, cv2.COLOR_RGBA2RGB)
+        rgb_frame = cv2.flip(rgb_frame, 1)
+        
+        # Create a unique filename
+        person_name = "person" # You can change this to a name from a form input
+        existing_files = len([name for name in os.listdir(db_path) if name.endswith(('.jpg', '.png'))])
+        filename = f"{person_name}_{existing_files + 1}.jpg"
+        filepath = os.path.join(db_path, filename)
+        
+        cv2.imwrite(filepath, rgb_frame)
+        print(f"Image saved to {filepath}")
+
+    return redirect(url_for('index'))
+
+# Note: The '/battle' route and game.html might not function as expected
+# as the hand gesture recognition part has been replaced.
 @app.route('/battle', methods=['POST'])
 def battle():
-    choices = ["ROCK", "PAPER", "SCISSOR"]
-    computer_choice = random.choice(choices)
-    player_choice = character
-    # result = "You Win"
-    if player_choice == computer_choice:
-        result = "Tie"
-    elif (player_choice == "ROCK" and computer_choice == "SCISSOR") or (player_choice == "PAPER" and computer_choice == "ROCK") or (player_choice == "SCISSOR" and computer_choice == "PAPER"):
-        result = "You Win"
-    elif (player_choice == "LOVE"):
-        result = "LOVE YOU 💓"
-    else:
-        result = "You Lose"
-    return render_template('game.html', computer_choice=computer_choice, player_choice=player_choice, result=result)
+    # This part is from the original app and may need adjustments
+    # as 'character' is no longer updated by hand gestures.
+    return render_template('game.html', computer_choice="N/A", player_choice="N/A", result="Face Reco Mode")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
