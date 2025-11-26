@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Raspberry Pi Webcam Stream</title>
+    <style>
+        button {
+            font-size: 24px;
+            padding: 15px 30px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div style="text-align: center;">
+        <h1>Live Stream</h1>
+        <img src="{{ url_for('video_feed') }}" width="640" height="480">
+    </div>
+    <form action="/battle" method="post">
+        <button type="submit">Battle</button>
+    </form>
+</body>
+</html>
