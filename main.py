@@ -35,7 +35,7 @@ safe_status = 'lock'  # lock, unlock
 allowed_users = ["mew"]
 
 def check_face(frame):
-    global face_locations, face_names, is_processing, safe_status
+    global face_locations, face_names, is_processing
     
     try:
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
@@ -70,8 +70,6 @@ def check_face(frame):
 
         if authorized_person_detected:
             safe_status = 'unlock'
-        else:
-            safe_status = 'lock'
 
     except Exception as e:
         print(f"Error in AI thread: {e}")
@@ -197,17 +195,14 @@ MPU_Init()
 input_buffer = []
 password = ['UP', 'DOWN', 'LEFT', 'RIGHT']
 lock_cmd = ['DOWN', 'DOWN']
-safe_status = 'open' # open lock unlock
 
 def lock():
-    safe_status = 'lock'
     led_line.set_value(0)
     buzzer_line.set_value(1)
     sleep(0.5)
     buzzer_line.set_value(0)
 
 def unlock():
-    safe_status = 'unlock'
     led_line.set_value(1)
     buzzer_line.set_value(1)
     sleep(0.1)
@@ -300,11 +295,15 @@ if __name__ == '__main__':
 
                     if safe_status != 'unlock':
                         if magnet_value == 0: # closed
-                                safe_satus = 'lock'
-                                buzzer_line.set_value(0)
+                            print('closed')
+                            safe_satus = 'lock'
+                            # buzzer_line.set_value(0)
+                            led_line.set_value(0)
                         else: # open
-                                safe_status = 'open'
-                                buzzer_line.set_value(1)
+                            print('open')
+                            safe_status = 'open'
+                            # buzzer_line.set_value(1)
+                            led_line.set_value(1)
 
                     joystick = []
                     vibrate = []
@@ -328,12 +327,14 @@ if __name__ == '__main__':
                         input_buffer.append(joystick[-1])
                         if safe_status == 'lock' or safe_status == 'open' and len(input_buffer) == len(password):
                             if input_buffer == password:
+                                safe_status = 'unlock'
                                 executor.submit(unlock)
                             else:
                                 executor.submit(bad_input)
                             input_buffer = []
                         elif safe_status == 'unlock' and len(input_buffer) == len(lock_cmd):
                             if input_buffer == lock_cmd:
+                                safe_status = 'lock'
                                 executor.submit(lock)
                             else:
                                 executor.submit(bad_input)
