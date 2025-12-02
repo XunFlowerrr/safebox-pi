@@ -15,7 +15,7 @@ from picamera2 import Picamera2
 import numpy as np
 
 # --- MQTT Configuration ---
-MQTT_BROKER = '10.146.134.87'  # Change to your MQTT broker IP
+MQTT_BROKER = '10.166.99.87'  # Change to your MQTT broker IP
 MQTT_PORT = 1883
 MQTT_TOPICS = {
     'SENSOR_DATA': 'safebox/sensor-data',
