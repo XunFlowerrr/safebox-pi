@@ -2,7 +2,8 @@ import smbus
 import math
 import gpiod
 import serial
-import requests
+import paho.mqtt.client as mqtt
+import json
 from time import sleep
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, Response, render_template, redirect, url_for, request
@@ -12,6 +13,68 @@ import threading
 import os
 from picamera2 import Picamera2
 import numpy as np
+
+# --- MQTT Configuration ---
+MQTT_BROKER = '10.166.99.87'  # Change to your MQTT broker IP
+MQTT_PORT = 1883
+MQTT_TOPICS = {
+    'SENSOR_DATA': 'safebox/sensor-data',
+    'SAFE_STATUS': 'safebox/safe-status',
+    'ROTATION_DATA': 'safebox/rotation-data',
+    'COMMAND': 'safebox/command',
+}
+
+# Initialize MQTT client
+mqtt_client = mqtt.Client(client_id=f"safebox-gateway-{os.getpid()}")
+mqtt_connected = False
+
+def on_mqtt_connect(client, userdata, flags, rc):
+    global mqtt_connected
+    if rc == 0:
+        print("Connected to MQTT broker")
+        mqtt_connected = True
+        # Subscribe to command topic to receive commands from backend
+        client.subscribe(MQTT_TOPICS['COMMAND'])
+    else:
+        print(f"Failed to connect to MQTT broker, return code {rc}")
+        mqtt_connected = False
+
+def on_mqtt_disconnect(client, userdata, rc):
+    global mqtt_connected
+    mqtt_connected = False
+    print("Disconnected from MQTT broker")
+
+def on_mqtt_message(client, userdata, msg):
+    """Handle incoming MQTT messages (commands from backend)"""
+    global safe_status
+    try:
+        payload = json.loads(msg.payload.decode())
+        print(f"Received command: {payload}")
+
+        if msg.topic == MQTT_TOPICS['COMMAND']:
+            command = payload.get('command')
+            if command == 'unlock':
+                safe_status = 'unlock'
+                unlock()
+            elif command == 'lock':
+                safe_status = 'lock'
+                lock()
+    except Exception as e:
+        print(f"Error processing MQTT message: {e}")
+
+mqtt_client.on_connect = on_mqtt_connect
+mqtt_client.on_disconnect = on_mqtt_disconnect
+mqtt_client.on_message = on_mqtt_message
+
+def connect_mqtt():
+    """Connect to MQTT broker with retry logic"""
+    global mqtt_connected
+    try:
+        mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        mqtt_client.loop_start()
+    except Exception as e:
+        print(f"Error connecting to MQTT: {e}")
+        mqtt_connected = False
 
 # --- Flask App and Face Recognition ---
 app = Flask(__name__)
@@ -35,16 +98,16 @@ safe_status = 'lock'  # lock, unlock
 allowed_users = ["mew"]
 
 def check_face(frame):
-    global face_locations, face_names, is_processing
-    
+    global face_locations, face_names, is_processing, safe_status
+
     try:
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
-        dfs = DeepFace.find(img_path=rgb_frame, 
-                            db_path=db_path, 
-                            model_name="VGG-Face", 
-                            enforce_detection=False, 
+        dfs = DeepFace.find(img_path=rgb_frame,
+                            db_path=db_path,
+                            model_name="VGG-Face",
+                            enforce_detection=False,
                             silent=True)
-        
+
         new_locations = []
         new_names = []
         authorized_person_detected = False
@@ -53,12 +116,12 @@ def check_face(frame):
             for df in dfs:
                 if not df.empty:
                     x, y, w, h = df.iloc[0]['source_x'], df.iloc[0]['source_y'], df.iloc[0]['source_w'], df.iloc[0]['source_h']
-                    
+
                     full_path = df.iloc[0]['identity']
                     filename = os.path.basename(full_path)
                     name_part = os.path.splitext(filename)[0]
                     name = ''.join(filter(str.isalpha, name_part))
-                    
+
                     new_locations.append((x, y, w, h))
                     new_names.append(name.upper())
 
@@ -73,7 +136,7 @@ def check_face(frame):
 
     except Exception as e:
         print(f"Error in AI thread: {e}")
-    
+
     finally:
         is_processing = False
 
@@ -86,7 +149,7 @@ def generate_frames():
             continue
 
         frame = cv2.flip(frame, 1)
-        
+
         if not is_processing:
             is_processing = True
             threading.Thread(target=check_face, args=(frame.copy(),)).start()
@@ -96,7 +159,7 @@ def generate_frames():
             cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
             cv2.rectangle(frame, (x, y-35), (x+w, y), color, cv2.FILLED)
             cv2.putText(frame, name, (x+6, y-6), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
-        
+
         if is_processing:
             cv2.circle(frame, (20, 20), 5, (0, 0, 255), -1)
 
@@ -126,7 +189,7 @@ def capture():
     if latest_frame is not None and name:
         rgb_frame = cv2.cvtColor(latest_frame, cv2.COLOR_RGBA2RGB)
         rgb_frame = cv2.flip(rgb_frame, 1)
-        
+
         i = 1
         while True:
             filename = f"{name}_{i}.jpg"
@@ -134,7 +197,7 @@ def capture():
             if not os.path.exists(filepath):
                 break
             i += 1
-        
+
         cv2.imwrite(filepath, rgb_frame)
         print(f"Image saved to {filepath}")
 
@@ -144,7 +207,6 @@ def run_flask_app():
     app.run(host='0.0.0.0', port=5000)
 
 # --- Hardware Control ---
-WEB_URL = 'http://10.146.134.87:3001'
 
 LED_PIN = 26
 MAGNET_PIN = 16
@@ -230,37 +292,67 @@ def beep():
     sleep(0.1)
     buzzer_line.set_value(0)
 
-def post_data(data):
+def publish_data(data):
+    """Publish sensor data to MQTT broker"""
+    global mqtt_connected
     try:
-        print(f'posting {data}')
+        if not mqtt_connected:
+            print("MQTT not connected, attempting to reconnect...")
+            connect_mqtt()
+            sleep(1)
+            if not mqtt_connected:
+                print("Failed to reconnect to MQTT")
+                return
+
+        print(f'Publishing data via MQTT: {data}')
         vibrate = data['vibrate']
         safeId = data['safeId']
-        print(requests.post(WEB_URL + '/api/rotation-data', json={
+
+        # Publish rotation data
+        rotation_payload = json.dumps({
             'alpha': data['Gx'],
             'beta': data['Gy'],
             'gamma': data['Gz'],
             'safeId': safeId,
-        }, timeout=2).json())
+        })
+        mqtt_client.publish(MQTT_TOPICS['ROTATION_DATA'], rotation_payload, qos=1)
+        print(f"Published rotation data: {rotation_payload}")
+
+        # Publish vibration data if available
         if len(vibrate) > 0:
-            print(requests.post(WEB_URL + '/api/sensor-data', json={
+            vibration_payload = json.dumps({
                 'sensorType': 'vibration',
-                'value': sum(vibrate)/len(vibrate),
+                'value': sum(vibrate) / len(vibrate),
                 'safeId': safeId,
-            }, timeout=2).json())
-        print(requests.post(WEB_URL + '/api/sensor-data', json={
+            })
+            mqtt_client.publish(MQTT_TOPICS['SENSOR_DATA'], vibration_payload, qos=1)
+            print(f"Published vibration data: {vibration_payload}")
+
+        # Publish tilt data
+        tilt_payload = json.dumps({
             'sensorType': 'tilt',
             'value': data['tilt'],
-            'unit': u'\u00b0' + '/s',
+            'unit': '°/s',
             'safeId': safeId,
-        }, timeout=2).json())
-        print(requests.post(WEB_URL + '/api/safe-status', json={
+        })
+        mqtt_client.publish(MQTT_TOPICS['SENSOR_DATA'], tilt_payload, qos=1)
+        print(f"Published tilt data: {tilt_payload}")
+
+        # Publish safe status
+        status_payload = json.dumps({
             'status': data['status'],
             'safeId': safeId,
-        }, timeout=2).json())
+        })
+        mqtt_client.publish(MQTT_TOPICS['SAFE_STATUS'], status_payload, qos=1)
+        print(f"Published status: {status_payload}")
+
     except Exception as e:
-        print('error(post):', e)
+        print(f'Error publishing to MQTT: {e}')
 
 if __name__ == '__main__':
+    # Connect to MQTT broker
+    connect_mqtt()
+
     # Start Flask app in a new thread
     flask_thread = threading.Thread(target=run_flask_app)
     flask_thread.daemon = True
@@ -286,7 +378,7 @@ if __name__ == '__main__':
                     Gy = gyro_y/131.0
                     Gz = gyro_z/131.0
 
-                    print ("Gx=%.2f" %Gx, u'\u00b0'+ "/s", "\tGy=%.2f" %Gy, u'\u00b0'+ "/s", "\tGz=%.2f" %Gz, u'\u00b0'+ "/s", "\tAx=%.2f g" %Ax, "\tAy=%.2f g" %Ay, "\tAz=%.2f g" %Az) 	
+                    print ("Gx=%.2f" %Gx, u'\u00b0'+ "/s", "\tGy=%.2f" %Gy, u'\u00b0'+ "/s", "\tGz=%.2f" %Gz, u'\u00b0'+ "/s", "\tAx=%.2f g" %Ax, "\tAy=%.2f g" %Ay, "\tAz=%.2f g" %Az)
 
                     tilt = math.sqrt(Gx**2 + Gy**2 + Gz**2)
 
@@ -340,7 +432,7 @@ if __name__ == '__main__':
                                 executor.submit(bad_input)
                             input_buffer = []
 
-                    executor.submit(post_data, {
+                    executor.submit(publish_data, {
                         'Gx': Gx,
                         'Gy': Gy,
                         'Gz': Gz,
@@ -356,6 +448,9 @@ if __name__ == '__main__':
         except Exception as e:
             print('error:', e)
         finally:
+            # Cleanup
+            mqtt_client.loop_stop()
+            mqtt_client.disconnect()
             buzzer_line.set_value(0)
             led_line.set_value(0)
             buzzer_line.release()
