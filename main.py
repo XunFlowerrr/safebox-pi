@@ -194,6 +194,47 @@ Device_Address = 0x68
 
 MPU_Init()
 
+input_buffer = []
+password = ['UP', 'DOWN', 'LEFT', 'RIGHT']
+lock_cmd = ['DOWN', 'DOWN']
+safe_status = 'open' # open lock unlock
+
+def lock():
+    safe_status = 'lock'
+    led_line.set_value(0)
+    buzzer_line.set_value(1)
+    sleep(0.5)
+    buzzer_line.set_value(0)
+
+def unlock():
+    safe_status = 'unlock'
+    led_line.set_value(1)
+    buzzer_line.set_value(1)
+    sleep(0.1)
+    buzzer_line.set_value(0)
+    sleep(0.1)
+    buzzer_line.set_value(1)
+    sleep(0.1)
+    buzzer_line.set_value(0)
+
+def bad_input():
+    buzzer_line.set_value(1)
+    sleep(0.2)
+    buzzer_line.set_value(0)
+    sleep(0.2)
+    buzzer_line.set_value(1)
+    sleep(0.2)
+    buzzer_line.set_value(0)
+    sleep(0.2)
+    buzzer_line.set_value(1)
+    sleep(0.2)
+    buzzer_line.set_value(0)
+
+def beep():
+    buzzer_line.set_value(1)
+    sleep(0.1)
+    buzzer_line.set_value(0)
+
 def post_data(data):
     try:
         print(f'posting {data}')
@@ -257,16 +298,13 @@ if __name__ == '__main__':
                     magnet_value = magnet_line.get_value()
                     print(f'magnet = {magnet_value}')
 
-                    if magnet_value == 0:
-                        buzzer_line.set_value(1)
-                    else:
-                        buzzer_line.set_value(0)
-
-                    # Control LED based on safe status
-                    if safe_status == 'unlock':
-                        led_line.set_value(1)
-                    else:
-                        led_line.set_value(0)
+                    if safe_status != 'unlock':
+                        if magnet_value == 0: # closed
+                                safe_satus = 'lock'
+                                buzzer_line.set_value(0)
+                        else: # open
+                                safe_status = 'open'
+                                buzzer_line.set_value(1)
 
                     joystick = []
                     vibrate = []
@@ -284,6 +322,22 @@ if __name__ == '__main__':
                             print(f'serial: {line}')
                     except serial.SerialException as e:
                         print('error(serial)', e)
+
+                    if len(joystick) > 0:
+                        executor.submit(beep)
+                        input_buffer.append(joystick[-1])
+                        if safe_status == 'lock' or safe_status == 'open' and len(input_buffer) == len(password):
+                            if input_buffer == password:
+                                executor.submit(unlock)
+                            else:
+                                executor.submit(bad_input)
+                            input_buffer = []
+                        elif safe_status == 'unlock' and len(input_buffer) == len(lock_cmd):
+                            if input_buffer == lock_cmd:
+                                executor.submit(lock)
+                            else:
+                                executor.submit(bad_input)
+                            input_buffer = []
 
                     executor.submit(post_data, {
                         'Gx': Gx,
